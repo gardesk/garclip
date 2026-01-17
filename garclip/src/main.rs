@@ -5,12 +5,12 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use tokio::io::AsyncWriteExt;
 use tokio::signal;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 use garclip::config::Config;
 use garclip::daemon::DaemonState;
 use garclip::ipc::protocol::Command;
-use garclip::ipc::{IpcClient, IpcServer};
+use garclip::ipc::{IpcClient, IpcServer, Response};
 
 #[derive(Parser)]
 #[command(name = "garclip")]
@@ -127,6 +127,19 @@ enum Commands {
     Stop,
 }
 
+/// A command request with a channel to send the response back
+struct CommandRequest {
+    command: Command,
+    response_tx: oneshot::Sender<Response>,
+}
+
+/// Request to register a client for event subscriptions
+struct SubscribeRequest {
+    client_id: u64,
+    events: Vec<String>,
+    writer: tokio::net::unix::OwnedWriteHalf,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -156,8 +169,17 @@ async fn main() -> Result<()> {
 async fn run_daemon(config: Config) -> Result<()> {
     tracing::info!("Starting garclip daemon");
 
-    // Create event channel
+    // Channel for events (clipboard changes, etc.)
     let (event_tx, mut event_rx) = mpsc::channel(100);
+
+    // Channel for commands from IPC clients
+    let (cmd_tx, mut cmd_rx) = mpsc::channel::<CommandRequest>(100);
+
+    // Channel for subscription requests
+    let (sub_tx, mut sub_rx) = mpsc::channel::<SubscribeRequest>(100);
+
+    // Channel to signal shutdown
+    let (shutdown_tx, mut shutdown_rx) = mpsc::channel::<()>(1);
 
     // Create daemon state
     let mut state = DaemonState::new(config.clone(), event_tx)?;
@@ -166,7 +188,8 @@ async fn run_daemon(config: Config) -> Result<()> {
     let ipc_server = IpcServer::new(config.socket_path())?;
 
     // Track connected clients with subscriptions
-    let mut subscribed_clients: HashMap<u64, tokio::net::unix::OwnedWriteHalf> = HashMap::new();
+    let mut subscribed_clients: HashMap<u64, (Vec<String>, tokio::net::unix::OwnedWriteHalf)> =
+        HashMap::new();
     let mut next_client_id = 0u64;
 
     // Main event loop
@@ -191,13 +214,17 @@ async fn run_daemon(config: Config) -> Result<()> {
             // Accept new IPC connections
             client = ipc_server.accept() => {
                 match client {
-                    Ok(mut client) => {
+                    Ok(client) => {
                         let client_id = next_client_id;
                         next_client_id += 1;
 
+                        let cmd_tx = cmd_tx.clone();
+                        let sub_tx = sub_tx.clone();
+                        let shutdown_tx = shutdown_tx.clone();
+
                         // Spawn task to handle this client
                         tokio::spawn(async move {
-                            handle_client(&mut client, client_id).await
+                            handle_client(client, client_id, cmd_tx, sub_tx, shutdown_tx).await
                         });
                     }
                     Err(e) => {
@@ -206,14 +233,38 @@ async fn run_daemon(config: Config) -> Result<()> {
                 }
             }
 
+            // Handle commands from IPC clients
+            Some(req) = cmd_rx.recv() => {
+                let response = state.handle_command(req.command).await;
+                let _ = req.response_tx.send(response);
+            }
+
+            // Handle subscription requests
+            Some(sub_req) = sub_rx.recv() => {
+                tracing::debug!("Client {} subscribed to: {:?}", sub_req.client_id, sub_req.events);
+                subscribed_clients.insert(sub_req.client_id, (sub_req.events, sub_req.writer));
+            }
+
             // Broadcast events to subscribed clients
             Some(event) = event_rx.recv() => {
+                let event_type = match &event {
+                    garclip::Event::ClipboardChanged { .. } => "clipboard_changed",
+                    garclip::Event::HistoryCleared => "history_cleared",
+                    garclip::Event::EntryPinned { .. } => "entry_pinned",
+                    garclip::Event::EntryUnpinned { .. } => "entry_unpinned",
+                    garclip::Event::EntryDeleted { .. } => "entry_deleted",
+                    garclip::Event::EntrySelected { .. } => "entry_selected",
+                };
+
                 let json = serde_json::to_string(&event).unwrap_or_default();
                 let mut to_remove = Vec::new();
 
-                for (&id, writer) in subscribed_clients.iter_mut() {
-                    if let Err(_) = writer.write_all(format!("{}\n", json).as_bytes()).await {
-                        to_remove.push(id);
+                for (&id, (events, writer)) in subscribed_clients.iter_mut() {
+                    // Check if client is subscribed to this event type
+                    if events.contains(&"all".to_string()) || events.contains(&event_type.to_string()) {
+                        if writer.write_all(format!("{}\n", json).as_bytes()).await.is_err() {
+                            to_remove.push(id);
+                        }
                     }
                 }
 
@@ -227,6 +278,12 @@ async fn run_daemon(config: Config) -> Result<()> {
                 if let Err(e) = state.save_history() {
                     tracing::error!("Error saving history: {}", e);
                 }
+            }
+
+            // Handle shutdown request from client
+            _ = shutdown_rx.recv() => {
+                tracing::info!("Received shutdown request");
+                break;
             }
 
             // Handle shutdown signals
@@ -244,37 +301,102 @@ async fn run_daemon(config: Config) -> Result<()> {
     Ok(())
 }
 
-async fn handle_client(client: &mut IpcClient, _client_id: u64) {
+async fn handle_client(
+    client: IpcClient,
+    client_id: u64,
+    cmd_tx: mpsc::Sender<CommandRequest>,
+    sub_tx: mpsc::Sender<SubscribeRequest>,
+    shutdown_tx: mpsc::Sender<()>,
+) {
+    let (reader, writer) = client.into_split();
+    let mut reader = tokio::io::BufReader::new(reader);
+    let mut writer = Some(writer);
+
+    use tokio::io::AsyncBufReadExt;
+
     loop {
-        match client.read_command().await {
-            Ok(Some(cmd)) => {
-                tracing::debug!("Received command: {:?}", cmd);
-
-                // Handle subscribe specially
-                if let Command::Subscribe { events } = &cmd {
-                    client.subscribe(events.clone());
-                    let _ = client.send_response(&garclip::Response::ok()).await;
-                    continue;
-                }
-
-                // For quit, we'd need to signal the main loop
-                if matches!(cmd, Command::Quit) {
-                    let _ = client.send_response(&garclip::Response::ok()).await;
-                    // In a real implementation, we'd signal shutdown here
-                    break;
-                }
-
-                // For other commands, we need access to daemon state
-                // This is a simplified version - in production, use channels
-                let response = garclip::Response::err("Command handling requires daemon state");
-                let _ = client.send_response(&response).await;
-            }
-            Ok(None) => {
-                // Client disconnected
+        let mut line = String::new();
+        match reader.read_line(&mut line).await {
+            Ok(0) => {
+                // EOF - client disconnected
+                tracing::debug!("Client {} disconnected", client_id);
                 break;
             }
+            Ok(_) => {
+                let cmd: Command = match serde_json::from_str(line.trim()) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        tracing::warn!("Invalid command from client {}: {}", client_id, e);
+                        if let Some(ref mut w) = writer {
+                            let resp = Response::err(format!("Invalid command: {}", e));
+                            let json = serde_json::to_string(&resp).unwrap_or_default();
+                            let _ = w.write_all(format!("{}\n", json).as_bytes()).await;
+                        }
+                        continue;
+                    }
+                };
+
+                tracing::debug!("Client {} sent: {:?}", client_id, cmd);
+
+                // Handle special commands
+                match &cmd {
+                    Command::Subscribe { events } => {
+                        // Take ownership of writer for subscription streaming
+                        if let Some(w) = writer.take() {
+                            let _ = sub_tx
+                                .send(SubscribeRequest {
+                                    client_id,
+                                    events: events.clone(),
+                                    writer: w,
+                                })
+                                .await;
+                        }
+                        // Client is now in subscription mode, exit handler
+                        // (events will be sent by the main loop)
+                        break;
+                    }
+                    Command::Quit => {
+                        // Send OK response then signal shutdown
+                        if let Some(ref mut w) = writer {
+                            let resp = Response::ok();
+                            let json = serde_json::to_string(&resp).unwrap_or_default();
+                            let _ = w.write_all(format!("{}\n", json).as_bytes()).await;
+                        }
+                        let _ = shutdown_tx.send(()).await;
+                        break;
+                    }
+                    _ => {
+                        // Send command to daemon and wait for response
+                        let (response_tx, response_rx) = oneshot::channel();
+                        let req = CommandRequest {
+                            command: cmd,
+                            response_tx,
+                        };
+
+                        if cmd_tx.send(req).await.is_err() {
+                            tracing::error!("Failed to send command to daemon");
+                            break;
+                        }
+
+                        match response_rx.await {
+                            Ok(response) => {
+                                if let Some(ref mut w) = writer {
+                                    let json = serde_json::to_string(&response).unwrap_or_default();
+                                    if w.write_all(format!("{}\n", json).as_bytes()).await.is_err() {
+                                        break;
+                                    }
+                                }
+                            }
+                            Err(_) => {
+                                tracing::error!("Failed to receive response from daemon");
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
             Err(e) => {
-                tracing::error!("Error reading command: {}", e);
+                tracing::error!("Error reading from client {}: {}", client_id, e);
                 break;
             }
         }
@@ -337,7 +459,9 @@ async fn run_client_command(config: Config, cmd: Commands) -> Result<()> {
                 eprintln!("Error: {}", response.error.unwrap_or_default());
             }
         }
-        Commands::History { json, .. } | Commands::ListPinned { json } | Commands::Search { json, .. } => {
+        Commands::History { json, .. }
+        | Commands::ListPinned { json }
+        | Commands::Search { json, .. } => {
             if response.success {
                 if json {
                     println!("{}", serde_json::to_string_pretty(&response.data)?);
