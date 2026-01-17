@@ -63,6 +63,10 @@ pub struct BehaviorConfig {
 
     /// Poll interval in milliseconds
     pub poll_interval_ms: u64,
+
+    /// Debounce time for PRIMARY selection in milliseconds
+    /// Prevents capturing partial text selections while dragging
+    pub primary_debounce_ms: u64,
 }
 
 /// Filter configuration
@@ -126,6 +130,7 @@ impl Default for BehaviorConfig {
             max_length: 10 * 1024 * 1024, // 10MB
             max_image_size: 50 * 1024 * 1024, // 50MB
             poll_interval_ms: 250,
+            primary_debounce_ms: 300,
         }
     }
 }
