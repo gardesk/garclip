@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use x11rb::protocol::xfixes::SelectionNotifyEvent as XFixesSelectionNotifyEvent;
 use x11rb::protocol::xproto::{Atom, SelectionRequestEvent, Window};
 use x11rb::rust_connection::RustConnection;
 
@@ -26,6 +27,9 @@ pub struct ClipboardManager {
 
     /// Whether to watch PRIMARY selection
     watch_primary: bool,
+
+    /// Whether XFixes monitoring is active
+    xfixes_active: bool,
 }
 
 impl ClipboardManager {
@@ -47,7 +51,112 @@ impl ClipboardManager {
             last_clipboard_owner: 0,
             last_primary_owner: 0,
             watch_primary,
+            xfixes_active: false,
         })
+    }
+
+    /// Start watching selections via XFixes (event-driven monitoring)
+    pub fn start_watching(&mut self) -> Result<()> {
+        let atoms = *self.selection_mgr.atoms();
+
+        // Watch CLIPBOARD
+        self.selection_mgr.watch_selection(atoms.clipboard)?;
+
+        // Optionally watch PRIMARY
+        if self.watch_primary {
+            self.selection_mgr.watch_selection(atoms.primary)?;
+        }
+
+        self.xfixes_active = true;
+        tracing::info!("XFixes selection monitoring active");
+
+        Ok(())
+    }
+
+    /// Check if XFixes monitoring is active
+    pub fn xfixes_active(&self) -> bool {
+        self.xfixes_active
+    }
+
+    /// Get the XFixes event base
+    pub fn xfixes_event_base(&self) -> u8 {
+        self.selection_mgr.xfixes_event_base()
+    }
+
+    /// Check if an event code is an XFixes SelectionNotify
+    pub fn is_xfixes_selection_notify(&self, event_code: u8) -> bool {
+        self.selection_mgr.is_xfixes_selection_notify(event_code)
+    }
+
+    /// Handle XFixes SelectionNotify event
+    pub fn handle_xfixes_selection_notify(
+        &mut self,
+        event: &XFixesSelectionNotifyEvent,
+    ) -> Result<Option<u64>> {
+        let atoms = *self.selection_mgr.atoms();
+        let our_window = self.selection_mgr.window();
+
+        // Ignore if we're the new owner
+        if event.owner == our_window {
+            return Ok(None);
+        }
+
+        tracing::debug!(
+            "XFixes SelectionNotify: selection={}, owner={}, subtype={:?}",
+            event.selection,
+            event.owner,
+            event.subtype
+        );
+
+        // Check which selection changed
+        let is_clipboard = event.selection == atoms.clipboard;
+        let is_primary = event.selection == atoms.primary && self.watch_primary;
+
+        if !is_clipboard && !is_primary {
+            return Ok(None);
+        }
+
+        // Owner released or window destroyed - claim ownership to preserve content
+        // subtype: 0 = SetSelectionOwner, 1 = SelectionWindowDestroy, 2 = SelectionClientClose
+        if event.owner == 0 {
+            // Selection was cleared, try to claim it with our stored content
+            if is_clipboard && self.current_clipboard.is_some() {
+                tracing::debug!("Clipboard owner released, claiming ownership");
+                self.selection_mgr.claim_ownership(atoms.clipboard)?;
+            } else if is_primary && self.current_primary.is_some() {
+                tracing::debug!("Primary owner released, claiming ownership");
+                self.selection_mgr.claim_ownership(atoms.primary)?;
+            }
+            return Ok(None);
+        }
+
+        // New owner - request content
+        let transfer = TransferManager::new(&self.selection_mgr);
+        let content = transfer.request_content(event.selection)?;
+
+        if let Some(content) = content {
+            tracing::debug!(
+                "Captured {} via XFixes: {}",
+                if is_clipboard { "clipboard" } else { "primary" },
+                content.preview(50)
+            );
+
+            // Store in history
+            let id = self.history.push(content.clone(), None);
+
+            // Store as current content
+            if is_clipboard {
+                self.current_clipboard = Some(content);
+                self.last_clipboard_owner = event.owner;
+            } else {
+                self.current_primary = Some(content);
+                self.last_primary_owner = event.owner;
+            }
+
+            return Ok(id);
+        }
+
+        Ok(None)
     }
 
     /// Get the X11 connection
@@ -75,13 +184,19 @@ impl ClipboardManager {
         &mut self.history
     }
 
-    /// Check for clipboard changes and capture new content
+    /// Check for clipboard changes and capture new content (polling fallback)
     pub fn poll_clipboard(&mut self) -> Result<Option<u64>> {
+        // Skip polling if XFixes is active
+        if self.xfixes_active {
+            return Ok(None);
+        }
+
         let atoms = *self.selection_mgr.atoms();
         let current_owner = self.selection_mgr.get_owner(atoms.clipboard)?;
 
         // Skip if we're the owner or if owner hasn't changed
-        if current_owner == self.selection_mgr.window() || current_owner == self.last_clipboard_owner
+        if current_owner == self.selection_mgr.window()
+            || current_owner == self.last_clipboard_owner
         {
             return Ok(None);
         }
@@ -110,8 +225,13 @@ impl ClipboardManager {
         Ok(None)
     }
 
-    /// Check for PRIMARY selection changes
+    /// Check for PRIMARY selection changes (polling fallback)
     pub fn poll_primary(&mut self) -> Result<Option<u64>> {
+        // Skip polling if XFixes is active
+        if self.xfixes_active {
+            return Ok(None);
+        }
+
         if !self.watch_primary {
             return Ok(None);
         }
@@ -119,7 +239,9 @@ impl ClipboardManager {
         let atoms = *self.selection_mgr.atoms();
         let current_owner = self.selection_mgr.get_owner(atoms.primary)?;
 
-        if current_owner == self.selection_mgr.window() || current_owner == self.last_primary_owner {
+        if current_owner == self.selection_mgr.window()
+            || current_owner == self.last_primary_owner
+        {
             return Ok(None);
         }
 
