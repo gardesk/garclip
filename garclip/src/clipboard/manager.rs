@@ -4,7 +4,8 @@ use x11rb::protocol::xfixes::SelectionNotifyEvent as XFixesSelectionNotifyEvent;
 use x11rb::protocol::xproto::{Atom, SelectionRequestEvent, Window};
 use x11rb::rust_connection::RustConnection;
 
-use crate::clipboard::{ClipboardContent, ClipboardHistory};
+use crate::clipboard::{ClipboardContent, ClipboardHistory, ContentFilter};
+use crate::config::Config;
 use crate::error::Result;
 use crate::x11::{Atoms, SelectionManager, TransferManager};
 
@@ -12,6 +13,7 @@ use crate::x11::{Atoms, SelectionManager, TransferManager};
 pub struct ClipboardManager {
     selection_mgr: SelectionManager,
     history: ClipboardHistory,
+    filter: ContentFilter,
 
     /// Current clipboard content (what we serve when we're the owner)
     current_clipboard: Option<ClipboardContent>,
@@ -38,21 +40,29 @@ impl ClipboardManager {
         conn: Arc<RustConnection>,
         screen_num: usize,
         history: ClipboardHistory,
-        watch_primary: bool,
+        config: &Config,
     ) -> Result<Self> {
         let atoms = Atoms::intern(&*conn)?;
         let selection_mgr = SelectionManager::new(conn, screen_num, atoms)?;
+        let filter = ContentFilter::new(&config.behavior, &config.filters);
 
         Ok(Self {
             selection_mgr,
             history,
+            filter,
             current_clipboard: None,
             current_primary: None,
             last_clipboard_owner: 0,
             last_primary_owner: 0,
-            watch_primary,
+            watch_primary: config.behavior.watch_primary,
             xfixes_active: false,
         })
+    }
+
+    /// Reload filter from new config
+    pub fn reload_filter(&mut self, config: &Config) {
+        self.filter.reload(&config.behavior, &config.filters);
+        self.watch_primary = config.behavior.watch_primary;
     }
 
     /// Start watching selections via XFixes (event-driven monitoring)
@@ -135,6 +145,11 @@ impl ClipboardManager {
         let content = transfer.request_content(event.selection)?;
 
         if let Some(content) = content {
+            // Apply content filter
+            if self.filter.should_filter(&content, None) {
+                return Ok(None);
+            }
+
             tracing::debug!(
                 "Captured {} via XFixes: {}",
                 if is_clipboard { "clipboard" } else { "primary" },
@@ -211,6 +226,11 @@ impl ClipboardManager {
         // Request content from new owner
         let transfer = TransferManager::new(&self.selection_mgr);
         if let Some(content) = transfer.request_content(atoms.clipboard)? {
+            // Apply content filter
+            if self.filter.should_filter(&content, None) {
+                return Ok(None);
+            }
+
             tracing::debug!("Captured clipboard: {}", content.preview(50));
 
             // Store in history
@@ -254,6 +274,11 @@ impl ClipboardManager {
         // Request content
         let transfer = TransferManager::new(&self.selection_mgr);
         if let Some(content) = transfer.request_content(atoms.primary)? {
+            // Apply content filter
+            if self.filter.should_filter(&content, None) {
+                return Ok(None);
+            }
+
             tracing::debug!("Captured primary: {}", content.preview(50));
 
             // Store in history (PRIMARY shares history with CLIPBOARD)
