@@ -47,7 +47,7 @@ impl DaemonState {
             conn,
             screen_num,
             history,
-            config.behavior.watch_primary,
+            &config,
         )?;
 
         // Start XFixes monitoring
@@ -69,6 +69,7 @@ impl DaemonState {
     /// Reload configuration
     pub fn reload_config(&mut self) -> Result<()> {
         self.config = Config::load_default();
+        self.manager.reload_filter(&self.config);
         tracing::info!("Configuration reloaded");
         Ok(())
     }
