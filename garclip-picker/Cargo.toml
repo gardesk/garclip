@@ -1,0 +1,38 @@
+[package]
+name = "garclip-picker"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Clipboard history picker UI for garclip"
+
+[[bin]]
+name = "garclip-picker"
+path = "src/main.rs"
+
+[dependencies]
+# gartk UI toolkit
+gartk-core = { path = "../../gartk/gartk-core" }
+gartk-x11 = { path = "../../gartk/gartk-x11" }
+gartk-render = { path = "../../gartk/gartk-render" }
+
+# garclip library for IPC
+garclip = { path = "../garclip" }
+
+# X11
+x11rb = { version = "0.13", features = ["randr"] }
+
+# Error handling
+anyhow.workspace = true
+
+# Logging
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+# Async for IPC
+tokio = { version = "1", features = ["rt", "net"] }
+
+# Serialization
+serde.workspace = true
+serde_json.workspace = true
