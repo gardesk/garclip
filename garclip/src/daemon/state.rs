@@ -139,6 +139,11 @@ impl DaemonState {
             }
         }
 
+        // Check for debounced PRIMARY content ready to commit
+        if let Some(id) = self.manager.commit_pending_primary() {
+            self.send_clipboard_event(id);
+        }
+
         Ok(())
     }
 
