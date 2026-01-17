@@ -647,13 +647,55 @@ fn handle_selection_request(&self, event: SelectionRequestEvent, data: &str) -> 
 
 ---
 
+## Progress & TODO
+
+### Phase 1: Foundation (COMPLETE)
+- [x] Project scaffolding (workspace, Cargo.toml)
+- [x] Error types
+- [x] X11 atom interning
+- [x] Selection ownership management
+- [x] Data transfer (request/response)
+- [x] Clipboard entry types (text + images)
+- [x] History storage with persistence
+- [x] Clipboard manager
+- [x] Configuration (TOML)
+- [x] IPC protocol (JSON over Unix socket)
+- [x] IPC server/client
+- [x] Daemon state machine
+- [x] CLI entry point
+- [x] garclipctl control tool
+
+### Phase 2: Daemon Command Handler (IN PROGRESS)
+- [ ] Refactor client handler to use channels for daemon state access
+- [ ] Proper async message passing between IPC and daemon loop
+- [ ] Handle all commands through the daemon (currently stubbed)
+
+### Phase 3: Selection Monitoring
+- [ ] XFixes extension for event-driven clipboard monitoring
+- [ ] Claim ownership when original owner releases
+- [ ] Reduce polling overhead
+
+### Phase 4: Filtering
+- [ ] Regex patterns to ignore content
+- [ ] Window class filtering (ignore password managers, etc.)
+- [ ] Configurable min/max content length enforcement
+
+### Phase 5: Signals & Lifecycle
+- [ ] SIGHUP for config reload
+- [ ] Graceful SIGTERM handling
+- [ ] PID file for single-instance enforcement
+
+### Phase 6: Integration
+- [ ] Query gar IPC for focused window class (source tracking)
+- [ ] Optional garlaunch integration for history picker UI
+- [ ] Systemd user service file
+
+---
+
 ## Open Questions
 
-1. **Image support** - Should we support images in Phase 1, or text-only first?
-   - Recommendation: Text-only first, images later
-
-2. **Encryption** - Should sensitive clipboard data be encrypted at rest?
+1. **Encryption** - Should sensitive clipboard data be encrypted at rest?
    - Recommendation: Optional, not in initial implementation
 
-3. **Popup UI** - Should garclip have its own history picker UI, or rely on garlaunch?
+2. **Popup UI** - Should garclip have its own history picker UI, or rely on garlaunch?
    - Recommendation: Defer UI to later, CLI-first approach
