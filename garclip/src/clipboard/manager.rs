@@ -7,7 +7,7 @@ use x11rb::rust_connection::RustConnection;
 use crate::clipboard::{ClipboardContent, ClipboardHistory, ContentFilter};
 use crate::config::Config;
 use crate::error::Result;
-use crate::x11::{Atoms, SelectionManager, TransferManager};
+use crate::x11::{get_window_class, Atoms, SelectionManager, TransferManager};
 
 /// Main clipboard manager that coordinates X11 selection handling and history
 pub struct ClipboardManager {
@@ -140,24 +140,28 @@ impl ClipboardManager {
             return Ok(None);
         }
 
+        // Get source application from owner window
+        let source = get_window_class(self.selection_mgr.conn(), event.owner);
+
         // New owner - request content
         let transfer = TransferManager::new(&self.selection_mgr);
         let content = transfer.request_content(event.selection)?;
 
         if let Some(content) = content {
             // Apply content filter
-            if self.filter.should_filter(&content, None) {
+            if self.filter.should_filter(&content, source.as_deref()) {
                 return Ok(None);
             }
 
             tracing::debug!(
-                "Captured {} via XFixes: {}",
+                "Captured {} via XFixes from {:?}: {}",
                 if is_clipboard { "clipboard" } else { "primary" },
+                source,
                 content.preview(50)
             );
 
-            // Store in history
-            let id = self.history.push(content.clone(), None);
+            // Store in history with source
+            let id = self.history.push(content.clone(), source);
 
             // Store as current content
             if is_clipboard {
@@ -223,18 +227,21 @@ impl ClipboardManager {
             return Ok(None);
         }
 
+        // Get source application from owner window
+        let source = get_window_class(self.selection_mgr.conn(), current_owner);
+
         // Request content from new owner
         let transfer = TransferManager::new(&self.selection_mgr);
         if let Some(content) = transfer.request_content(atoms.clipboard)? {
             // Apply content filter
-            if self.filter.should_filter(&content, None) {
+            if self.filter.should_filter(&content, source.as_deref()) {
                 return Ok(None);
             }
 
-            tracing::debug!("Captured clipboard: {}", content.preview(50));
+            tracing::debug!("Captured clipboard from {:?}: {}", source, content.preview(50));
 
-            // Store in history
-            let id = self.history.push(content.clone(), None);
+            // Store in history with source
+            let id = self.history.push(content.clone(), source);
 
             // Store as current content
             self.current_clipboard = Some(content);
@@ -271,18 +278,21 @@ impl ClipboardManager {
             return Ok(None);
         }
 
+        // Get source application from owner window
+        let source = get_window_class(self.selection_mgr.conn(), current_owner);
+
         // Request content
         let transfer = TransferManager::new(&self.selection_mgr);
         if let Some(content) = transfer.request_content(atoms.primary)? {
             // Apply content filter
-            if self.filter.should_filter(&content, None) {
+            if self.filter.should_filter(&content, source.as_deref()) {
                 return Ok(None);
             }
 
-            tracing::debug!("Captured primary: {}", content.preview(50));
+            tracing::debug!("Captured primary from {:?}: {}", source, content.preview(50));
 
-            // Store in history (PRIMARY shares history with CLIPBOARD)
-            let id = self.history.push(content.clone(), None);
+            // Store in history (PRIMARY shares history with CLIPBOARD) with source
+            let id = self.history.push(content.clone(), source);
 
             // Store as current primary content
             self.current_primary = Some(content);
