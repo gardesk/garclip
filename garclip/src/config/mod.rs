@@ -1,3 +1,3 @@
 mod types;
 
-pub use types::Config;
+pub use types::{BehaviorConfig, Config, FilterConfig};
