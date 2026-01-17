@@ -1,0 +1,41 @@
+[workspace]
+resolver = "2"
+members = ["garclip", "garclipctl"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["mfwolffe"]
+license = "MIT"
+repository = "https://github.com/mfwolffe/gardesk"
+
+[workspace.dependencies]
+# X11
+x11rb = { version = "0.13", features = ["allow-unsafe-code"] }
+
+# Async runtime
+tokio = { version = "1", features = ["full", "signal"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "0.8"
+
+# Error handling
+thiserror = "2.0"
+anyhow = "1.0"
+
+# CLI
+clap = { version = "4.5", features = ["derive"] }
+
+# Utilities
+dirs = "6.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+regex = "1.10"
+base64 = "0.22"
+blake3 = "1.5"
+chrono = { version = "0.4", features = ["serde"] }
+
+# Image handling
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
