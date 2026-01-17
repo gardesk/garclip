@@ -1,0 +1,15 @@
+#!/bin/bash
+# garclip-rofi - Clipboard history picker using rofi
+
+# Get history and format for rofi
+# Format: ID | TYPE | PREVIEW
+selection=$(garclipctl history --limit 50 | rofi -dmenu -i -p "Clipboard" -format "s")
+
+if [ -n "$selection" ]; then
+    # Extract the ID (first field before the pipe)
+    id=$(echo "$selection" | awk -F'|' '{print $1}' | tr -d ' *')
+
+    if [ -n "$id" ]; then
+        garclipctl select "$id"
+    fi
+fi
