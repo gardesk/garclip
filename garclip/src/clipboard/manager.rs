@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use x11rb::protocol::xfixes::SelectionNotifyEvent as XFixesSelectionNotifyEvent;
 use x11rb::protocol::xproto::{Atom, SelectionRequestEvent, Window};
@@ -8,6 +9,13 @@ use crate::clipboard::{ClipboardContent, ClipboardHistory, ContentFilter};
 use crate::config::Config;
 use crate::error::Result;
 use crate::x11::{get_window_class, Atoms, SelectionManager, TransferManager};
+
+/// Pending PRIMARY selection content awaiting debounce
+struct PendingPrimary {
+    content: ClipboardContent,
+    source: Option<String>,
+    timestamp: Instant,
+}
 
 /// Main clipboard manager that coordinates X11 selection handling and history
 pub struct ClipboardManager {
@@ -32,6 +40,12 @@ pub struct ClipboardManager {
 
     /// Whether XFixes monitoring is active
     xfixes_active: bool,
+
+    /// Pending PRIMARY content (for debouncing)
+    pending_primary: Option<PendingPrimary>,
+
+    /// Debounce duration for PRIMARY selection
+    primary_debounce: Duration,
 }
 
 impl ClipboardManager {
@@ -56,6 +70,8 @@ impl ClipboardManager {
             last_primary_owner: 0,
             watch_primary: config.behavior.watch_primary,
             xfixes_active: false,
+            pending_primary: None,
+            primary_debounce: Duration::from_millis(config.behavior.primary_debounce_ms),
         })
     }
 
@@ -63,6 +79,7 @@ impl ClipboardManager {
     pub fn reload_filter(&mut self, config: &Config) {
         self.filter.reload(&config.behavior, &config.filters);
         self.watch_primary = config.behavior.watch_primary;
+        self.primary_debounce = Duration::from_millis(config.behavior.primary_debounce_ms);
     }
 
     /// Start watching selections via XFixes (event-driven monitoring)
@@ -153,29 +170,64 @@ impl ClipboardManager {
                 return Ok(None);
             }
 
-            tracing::debug!(
-                "Captured {} via XFixes from {:?}: {}",
-                if is_clipboard { "clipboard" } else { "primary" },
-                source,
-                content.preview(50)
-            );
-
-            // Store in history with source
-            let id = self.history.push(content.clone(), source);
-
-            // Store as current content
             if is_clipboard {
+                // CLIPBOARD: store immediately
+                tracing::debug!(
+                    "Captured clipboard via XFixes from {:?}: {}",
+                    source,
+                    content.preview(50)
+                );
+
+                let id = self.history.push(content.clone(), source);
                 self.current_clipboard = Some(content);
                 self.last_clipboard_owner = event.owner;
+                return Ok(id);
             } else {
-                self.current_primary = Some(content);
-                self.last_primary_owner = event.owner;
-            }
+                // PRIMARY: debounce to avoid capturing partial selections
+                tracing::trace!(
+                    "Pending primary via XFixes from {:?}: {}",
+                    source,
+                    content.preview(50)
+                );
 
-            return Ok(id);
+                self.pending_primary = Some(PendingPrimary {
+                    content,
+                    source,
+                    timestamp: Instant::now(),
+                });
+                self.last_primary_owner = event.owner;
+                return Ok(None);
+            }
         }
 
         Ok(None)
+    }
+
+    /// Commit pending PRIMARY content if debounce period has elapsed
+    /// Returns the entry ID if content was committed
+    pub fn commit_pending_primary(&mut self) -> Option<u64> {
+        let pending = self.pending_primary.take()?;
+
+        if pending.timestamp.elapsed() < self.primary_debounce {
+            // Not ready yet, put it back
+            self.pending_primary = Some(pending);
+            return None;
+        }
+
+        tracing::debug!(
+            "Committing debounced primary from {:?}: {}",
+            pending.source,
+            pending.content.preview(50)
+        );
+
+        let id = self.history.push(pending.content.clone(), pending.source);
+        self.current_primary = Some(pending.content);
+        id
+    }
+
+    /// Check if there's pending primary content
+    pub fn has_pending_primary(&self) -> bool {
+        self.pending_primary.is_some()
     }
 
     /// Get the X11 connection
