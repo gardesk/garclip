@@ -2,4 +2,5 @@ docs/
 .fackr/
 .vscode/
 CLAUDE.md
-/target/PLAN.md
+/target/
+PLAN.md
