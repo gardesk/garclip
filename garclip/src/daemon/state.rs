@@ -6,6 +6,7 @@ use tokio::sync::mpsc;
 use x11rb::connection::Connection;
 use x11rb::protocol::xproto::{SelectionClearEvent, SelectionRequestEvent};
 use x11rb::protocol::Event as X11Event;
+use x11rb::protocol::xfixes::SelectionNotifyEvent as XFixesSelectionNotifyEvent;
 use x11rb::rust_connection::RustConnection;
 
 use crate::clipboard::{ClipboardContent, ClipboardHistory, ClipboardManager};
@@ -42,12 +43,15 @@ impl DaemonState {
         };
 
         // Create clipboard manager
-        let manager = ClipboardManager::new(
+        let mut manager = ClipboardManager::new(
             conn,
             screen_num,
             history,
             config.behavior.watch_primary,
         )?;
+
+        // Start XFixes monitoring
+        manager.start_watching()?;
 
         Ok(Self {
             config,
@@ -69,54 +73,48 @@ impl DaemonState {
         Ok(())
     }
 
-    /// Poll for clipboard changes
+    /// Poll for clipboard changes (fallback when XFixes not active)
     pub fn poll_clipboard(&mut self) -> Result<()> {
+        // Skip if XFixes is active
+        if self.manager.xfixes_active() {
+            return Ok(());
+        }
+
         // Poll CLIPBOARD
         if self.config.behavior.watch_clipboard {
             if let Some(id) = self.manager.poll_clipboard()? {
-                if let Some(entry) = self.manager.history().get(id) {
-                    let content_type = if entry.content.is_text() {
-                        "text"
-                    } else {
-                        "image"
-                    };
-
-                    let event = Event::ClipboardChanged {
-                        id,
-                        preview: entry.preview(100),
-                        source: entry.source.clone(),
-                        content_type: content_type.to_string(),
-                    };
-
-                    // Send event (non-blocking)
-                    let _ = self.event_tx.try_send(event);
-                }
+                self.send_clipboard_event(id);
             }
         }
 
         // Poll PRIMARY
         if self.config.behavior.watch_primary {
             if let Some(id) = self.manager.poll_primary()? {
-                if let Some(entry) = self.manager.history().get(id) {
-                    let content_type = if entry.content.is_text() {
-                        "text"
-                    } else {
-                        "image"
-                    };
-
-                    let event = Event::ClipboardChanged {
-                        id,
-                        preview: entry.preview(100),
-                        source: entry.source.clone(),
-                        content_type: content_type.to_string(),
-                    };
-
-                    let _ = self.event_tx.try_send(event);
-                }
+                self.send_clipboard_event(id);
             }
         }
 
         Ok(())
+    }
+
+    /// Send clipboard change event
+    fn send_clipboard_event(&self, id: u64) {
+        if let Some(entry) = self.manager.history().get(id) {
+            let content_type = if entry.content.is_text() {
+                "text"
+            } else {
+                "image"
+            };
+
+            let event = Event::ClipboardChanged {
+                id,
+                preview: entry.preview(100),
+                source: entry.source.clone(),
+                content_type: content_type.to_string(),
+            };
+
+            let _ = self.event_tx.try_send(event);
+        }
     }
 
     /// Process X11 events
@@ -125,17 +123,30 @@ impl DaemonState {
 
         while let Ok(Some(event)) = conn.poll_for_event() {
             match event {
-                X11Event::SelectionRequest(req) => {
-                    self.handle_selection_request(&req)?;
+                X11Event::XfixesSelectionNotify(ref xfixes_event) => {
+                    if let Some(id) = self.handle_xfixes_selection_notify(xfixes_event)? {
+                        self.send_clipboard_event(id);
+                    }
                 }
-                X11Event::SelectionClear(clear) => {
-                    self.handle_selection_clear(&clear);
+                X11Event::SelectionRequest(ref req) => {
+                    self.handle_selection_request(req)?;
+                }
+                X11Event::SelectionClear(ref clear) => {
+                    self.handle_selection_clear(clear);
                 }
                 _ => {}
             }
         }
 
         Ok(())
+    }
+
+    /// Handle XFixes SelectionNotify event
+    fn handle_xfixes_selection_notify(
+        &mut self,
+        event: &XFixesSelectionNotifyEvent,
+    ) -> Result<Option<u64>> {
+        self.manager.handle_xfixes_selection_notify(event)
     }
 
     /// Handle a selection request
