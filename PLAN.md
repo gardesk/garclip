@@ -665,10 +665,12 @@ fn handle_selection_request(&self, event: SelectionRequestEvent, data: &str) -> 
 - [x] CLI entry point
 - [x] garclipctl control tool
 
-### Phase 2: Daemon Command Handler (IN PROGRESS)
-- [ ] Refactor client handler to use channels for daemon state access
-- [ ] Proper async message passing between IPC and daemon loop
-- [ ] Handle all commands through the daemon (currently stubbed)
+### Phase 2: Daemon Command Handler (COMPLETE)
+- [x] Refactor client handler to use channels for daemon state access
+- [x] Proper async message passing between IPC and daemon loop
+- [x] Handle all commands through the daemon via CommandRequest + oneshot
+- [x] Handle Quit command for graceful shutdown
+- [x] Handle Subscribe for event streaming to clients
 
 ### Phase 3: Selection Monitoring
 - [ ] XFixes extension for event-driven clipboard monitoring
