@@ -1,10 +1,11 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use tokio::io::AsyncWriteExt;
-use tokio::signal;
+use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::{mpsc, oneshot};
 
 use garclip::config::Config;
@@ -140,6 +141,45 @@ struct SubscribeRequest {
     writer: tokio::net::unix::OwnedWriteHalf,
 }
 
+/// Get the PID file path
+fn pid_file_path() -> PathBuf {
+    std::env::var("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("/tmp"))
+        .join("garclip.pid")
+}
+
+/// Check if another instance is running
+fn check_existing_instance() -> Result<()> {
+    let pid_path = pid_file_path();
+    if pid_path.exists() {
+        let pid_str = std::fs::read_to_string(&pid_path)?;
+        if let Ok(pid) = pid_str.trim().parse::<i32>() {
+            // Check if process is still running
+            let proc_path = format!("/proc/{}", pid);
+            if std::path::Path::new(&proc_path).exists() {
+                anyhow::bail!("Another garclip instance is running (PID {})", pid);
+            }
+        }
+        // Stale PID file, remove it
+        std::fs::remove_file(&pid_path)?;
+    }
+    Ok(())
+}
+
+/// Write the PID file
+fn write_pid_file() -> Result<()> {
+    let pid_path = pid_file_path();
+    std::fs::write(&pid_path, std::process::id().to_string())?;
+    Ok(())
+}
+
+/// Remove the PID file
+fn remove_pid_file() {
+    let pid_path = pid_file_path();
+    let _ = std::fs::remove_file(pid_path);
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -169,6 +209,12 @@ async fn main() -> Result<()> {
 async fn run_daemon(config: Config) -> Result<()> {
     tracing::info!("Starting garclip daemon");
 
+    // Check for existing instance
+    check_existing_instance()?;
+
+    // Write PID file
+    write_pid_file()?;
+
     // Channel for events (clipboard changes, etc.)
     let (event_tx, mut event_rx) = mpsc::channel(100);
 
@@ -180,6 +226,11 @@ async fn run_daemon(config: Config) -> Result<()> {
 
     // Channel to signal shutdown
     let (shutdown_tx, mut shutdown_rx) = mpsc::channel::<()>(1);
+
+    // Set up signal handlers
+    let mut sigterm = signal(SignalKind::terminate())?;
+    let mut sigint = signal(SignalKind::interrupt())?;
+    let mut sighup = signal(SignalKind::hangup())?;
 
     // Create daemon state
     let mut state = DaemonState::new(config.clone(), event_tx)?;
@@ -286,16 +337,33 @@ async fn run_daemon(config: Config) -> Result<()> {
                 break;
             }
 
-            // Handle shutdown signals
-            _ = signal::ctrl_c() => {
+            // Handle SIGTERM
+            _ = sigterm.recv() => {
+                tracing::info!("Received SIGTERM, shutting down");
+                break;
+            }
+
+            // Handle SIGINT (Ctrl+C)
+            _ = sigint.recv() => {
                 tracing::info!("Received SIGINT, shutting down");
                 break;
+            }
+
+            // Handle SIGHUP (reload config)
+            _ = sighup.recv() => {
+                tracing::info!("Received SIGHUP, reloading configuration");
+                if let Err(e) = state.reload_config() {
+                    tracing::error!("Error reloading config: {}", e);
+                }
             }
         }
     }
 
     // Save history on exit
     state.save_history()?;
+
+    // Clean up PID file
+    remove_pid_file();
 
     tracing::info!("Daemon stopped");
     Ok(())
