@@ -2,3 +2,4 @@ docs/
 .fackr/
 .vscode/
 CLAUDE.md
+/target/
