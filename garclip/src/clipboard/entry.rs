@@ -15,6 +15,14 @@ pub enum ClipboardContent {
         /// MIME type (e.g., "image/png")
         mime_type: String,
     },
+
+    /// File URIs (for file manager copy/paste)
+    Files {
+        /// File URIs (e.g., "file:///home/user/file.txt")
+        uris: Vec<String>,
+        /// Whether this is a cut operation (move vs copy)
+        is_cut: bool,
+    },
 }
 
 impl ClipboardContent {
@@ -36,6 +44,21 @@ impl ClipboardContent {
             ClipboardContent::Image { data, mime_type } => {
                 format!("[Image: {}, {} bytes]", mime_type, data.len())
             }
+            ClipboardContent::Files { uris, is_cut } => {
+                let action = if *is_cut { "Cut" } else { "Copy" };
+                let count = uris.len();
+                if count == 1 {
+                    // Show the filename for single file
+                    let path = uris[0].strip_prefix("file://").unwrap_or(&uris[0]);
+                    let name = std::path::Path::new(path)
+                        .file_name()
+                        .map(|n| n.to_string_lossy())
+                        .unwrap_or_else(|| path.into());
+                    format!("[{}: {}]", action, name)
+                } else {
+                    format!("[{}: {} files]", action, count)
+                }
+            }
         }
     }
 
@@ -47,6 +70,11 @@ impl ClipboardContent {
     /// Check if this content is an image
     pub fn is_image(&self) -> bool {
         matches!(self, ClipboardContent::Image { .. })
+    }
+
+    /// Check if this content is file URIs
+    pub fn is_files(&self) -> bool {
+        matches!(self, ClipboardContent::Files { .. })
     }
 
     /// Get text content if this is text
@@ -65,6 +93,14 @@ impl ClipboardContent {
         }
     }
 
+    /// Get file URIs if this is files
+    pub fn as_files(&self) -> Option<(&[String], bool)> {
+        match self {
+            ClipboardContent::Files { uris, is_cut } => Some((uris, *is_cut)),
+            _ => None,
+        }
+    }
+
     /// Get the content hash for deduplication
     pub fn hash(&self) -> String {
         match self {
@@ -76,6 +112,16 @@ impl ClipboardContent {
                 let hash = blake3::hash(data);
                 hash.to_hex().to_string()
             }
+            ClipboardContent::Files { uris, is_cut } => {
+                // Hash URIs and cut flag together
+                let mut hasher = blake3::Hasher::new();
+                for uri in uris {
+                    hasher.update(uri.as_bytes());
+                    hasher.update(b"\n");
+                }
+                hasher.update(if *is_cut { b"cut" } else { b"copy" });
+                hasher.finalize().to_hex().to_string()
+            }
         }
     }
 
@@ -84,6 +130,9 @@ impl ClipboardContent {
         match self {
             ClipboardContent::Text(text) => text.len(),
             ClipboardContent::Image { data, .. } => data.len(),
+            ClipboardContent::Files { uris, .. } => {
+                uris.iter().map(|u| u.len()).sum()
+            }
         }
     }
 }
@@ -102,6 +151,16 @@ impl PartialEq for ClipboardContent {
                     mime_type: mb,
                 },
             ) => a == b && ma == mb,
+            (
+                ClipboardContent::Files {
+                    uris: a,
+                    is_cut: ca,
+                },
+                ClipboardContent::Files {
+                    uris: b,
+                    is_cut: cb,
+                },
+            ) => a == b && ca == cb,
             _ => false,
         }
     }

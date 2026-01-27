@@ -228,6 +228,8 @@ impl DaemonState {
                     text: Some(text.clone()),
                     image_data: None,
                     mime_type: None,
+                    file_uris: None,
+                    is_cut: None,
                 },
                 ClipboardContent::Image { data, mime_type } => PasteResponse {
                     id: entry.id,
@@ -235,6 +237,17 @@ impl DaemonState {
                     text: None,
                     image_data: Some(STANDARD.encode(data)),
                     mime_type: Some(mime_type.clone()),
+                    file_uris: None,
+                    is_cut: None,
+                },
+                ClipboardContent::Files { uris, is_cut } => PasteResponse {
+                    id: entry.id,
+                    content_type: "files".to_string(),
+                    text: None,
+                    image_data: None,
+                    mime_type: None,
+                    file_uris: Some(uris.clone()),
+                    is_cut: Some(*is_cut),
                 },
             };
             Response::ok_with_data(response)

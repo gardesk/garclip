@@ -191,6 +191,10 @@ impl ClipboardHistory {
             .filter(|e| match &e.content {
                 ClipboardContent::Text(text) => text.to_lowercase().contains(&query_lower),
                 ClipboardContent::Image { .. } => false,
+                ClipboardContent::Files { uris, .. } => {
+                    // Search by file paths/names
+                    uris.iter().any(|uri| uri.to_lowercase().contains(&query_lower))
+                }
             })
             .take(limit)
             .collect()

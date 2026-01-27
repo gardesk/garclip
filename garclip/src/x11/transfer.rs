@@ -166,7 +166,7 @@ impl<'a> TransferManager<'a> {
         Ok(Some((data, mime_type)))
     }
 
-    /// Request clipboard content (text or image)
+    /// Request clipboard content (files, images, or text)
     pub fn request_content(&self, selection: Atom) -> Result<Option<ClipboardContent>> {
         let atoms = self.atoms();
 
@@ -176,7 +176,14 @@ impl<'a> TransferManager<'a> {
             return Ok(None);
         }
 
-        // Prefer images over text (images often have text alternatives)
+        // Prefer files first (most specialized content type)
+        if let Some(file_target) = atoms.preferred_file_target(&targets) {
+            if let Some((uris, is_cut)) = self.request_files_target(selection, file_target)? {
+                return Ok(Some(ClipboardContent::Files { uris, is_cut }));
+            }
+        }
+
+        // Then images (images often have text alternatives)
         if let Some(img_target) = atoms.preferred_image_target(&targets) {
             if let Some((data, mime)) = self.request_image_target(selection, img_target)? {
                 return Ok(Some(ClipboardContent::Image { data, mime_type: mime }));
@@ -240,6 +247,56 @@ impl<'a> TransferManager<'a> {
         let data = self.read_property_bytes(atoms.garclip_data)?;
         let mime_type = self.atom_to_mime(target);
         Ok(Some((data, mime_type)))
+    }
+
+    /// Request file URIs from clipboard
+    fn request_files_target(
+        &self,
+        selection: Atom,
+        target: Atom,
+    ) -> Result<Option<(Vec<String>, bool)>> {
+        let atoms = self.atoms();
+
+        self.conn().convert_selection(
+            self.window(),
+            selection,
+            target,
+            atoms.garclip_data,
+            CURRENT_TIME,
+        )?;
+        self.conn().flush()?;
+
+        let event = self.wait_for_selection_notify(selection, target)?;
+        if event.property == x11rb::NONE {
+            return Ok(None);
+        }
+
+        let data = self.read_property_string(atoms.garclip_data)?;
+
+        // Parse based on format
+        if target == atoms.gnome_copied_files {
+            // Format: "copy\nfile:///path1\nfile:///path2" or "cut\n..."
+            let mut lines = data.lines();
+            let action = lines.next().unwrap_or("copy");
+            let is_cut = action == "cut";
+            let uris: Vec<String> = lines.map(|s| s.to_string()).collect();
+            if uris.is_empty() {
+                return Ok(None);
+            }
+            Ok(Some((uris, is_cut)))
+        } else {
+            // text/uri-list format: "file:///path1\r\nfile:///path2\r\n"
+            let uris: Vec<String> = data
+                .lines()
+                .map(|s| s.trim_end_matches('\r').to_string())
+                .filter(|s| !s.is_empty() && !s.starts_with('#'))
+                .collect();
+            if uris.is_empty() {
+                return Ok(None);
+            }
+            // text/uri-list doesn't indicate cut, assume copy
+            Ok(Some((uris, false)))
+        }
     }
 
     /// Wait for a SelectionNotify event
@@ -358,6 +415,15 @@ impl<'a> TransferManager<'a> {
                         targets.push(atoms.image_png);
                     }
                 }
+                ClipboardContent::Files { is_cut, .. } => {
+                    targets.extend(atoms.supported_file_targets());
+                    // Also offer text formats for compatibility
+                    targets.extend(atoms.supported_text_targets());
+                    // Add KDE cut indicator if this is a cut operation
+                    if *is_cut {
+                        targets.push(atoms.kde_cut_selection);
+                    }
+                }
             }
 
             self.conn().change_property32(
@@ -376,10 +442,63 @@ impl<'a> TransferManager<'a> {
                 Atom::from(x11rb::protocol::xproto::AtomEnum::INTEGER),
                 &[CURRENT_TIME],
             )?;
+        } else if atoms.is_file_target(target) {
+            // Respond with file URIs
+            match content {
+                ClipboardContent::Files { uris, is_cut } => {
+                    let data = if target == atoms.gnome_copied_files {
+                        // x-special/gnome-copied-files format
+                        let action = if *is_cut { "cut" } else { "copy" };
+                        std::iter::once(action.to_string())
+                            .chain(uris.iter().cloned())
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    } else {
+                        // text/uri-list format
+                        uris.iter()
+                            .map(|uri| format!("{}\r\n", uri))
+                            .collect::<String>()
+                    };
+                    self.conn().change_property8(
+                        PropMode::REPLACE,
+                        event.requestor,
+                        property,
+                        target,
+                        data.as_bytes(),
+                    )?;
+                }
+                _ => success = false,
+            }
+        } else if target == atoms.kde_cut_selection {
+            // KDE cut selection indicator
+            match content {
+                ClipboardContent::Files { is_cut, .. } => {
+                    let data = if *is_cut { "1" } else { "0" };
+                    self.conn().change_property8(
+                        PropMode::REPLACE,
+                        event.requestor,
+                        property,
+                        target,
+                        data.as_bytes(),
+                    )?;
+                }
+                _ => success = false,
+            }
         } else if atoms.is_text_target(target) {
             // Respond with text
             match content {
                 ClipboardContent::Text(text) => {
+                    self.conn().change_property8(
+                        PropMode::REPLACE,
+                        event.requestor,
+                        property,
+                        target,
+                        text.as_bytes(),
+                    )?;
+                }
+                ClipboardContent::Files { uris, .. } => {
+                    // For text targets, send URIs as newline-separated text
+                    let text = uris.join("\n");
                     self.conn().change_property8(
                         PropMode::REPLACE,
                         event.requestor,

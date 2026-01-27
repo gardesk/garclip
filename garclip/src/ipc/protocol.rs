@@ -239,4 +239,12 @@ pub struct PasteResponse {
     /// Image MIME type (if image)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mime_type: Option<String>,
+
+    /// File URIs (if files)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file_uris: Option<Vec<String>>,
+
+    /// Whether this is a cut operation (if files)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub is_cut: Option<bool>,
 }

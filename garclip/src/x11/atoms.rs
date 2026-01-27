@@ -32,6 +32,11 @@ pub struct Atoms {
     pub image_bmp: Atom,
     pub image_webp: Atom,
 
+    // File clipboard targets
+    pub text_uri_list: Atom,
+    pub gnome_copied_files: Atom,
+    pub kde_cut_selection: Atom,
+
     // Clipboard manager atoms
     pub clipboard_manager: Atom,
     pub save_targets: Atom,
@@ -65,6 +70,10 @@ impl Atoms {
         let image_bmp = conn.intern_atom(false, b"image/bmp")?;
         let image_webp = conn.intern_atom(false, b"image/webp")?;
 
+        let text_uri_list = conn.intern_atom(false, b"text/uri-list")?;
+        let gnome_copied_files = conn.intern_atom(false, b"x-special/gnome-copied-files")?;
+        let kde_cut_selection = conn.intern_atom(false, b"application/x-kde-cutselection")?;
+
         let clipboard_manager = conn.intern_atom(false, b"CLIPBOARD_MANAGER")?;
         let save_targets = conn.intern_atom(false, b"SAVE_TARGETS")?;
 
@@ -94,6 +103,10 @@ impl Atoms {
             image_gif: image_gif.reply()?.atom,
             image_bmp: image_bmp.reply()?.atom,
             image_webp: image_webp.reply()?.atom,
+
+            text_uri_list: text_uri_list.reply()?.atom,
+            gnome_copied_files: gnome_copied_files.reply()?.atom,
+            kde_cut_selection: kde_cut_selection.reply()?.atom,
 
             clipboard_manager: clipboard_manager.reply()?.atom,
             save_targets: save_targets.reply()?.atom,
@@ -125,6 +138,11 @@ impl Atoms {
             || atom == self.image_gif
             || atom == self.image_bmp
             || atom == self.image_webp
+    }
+
+    /// Check if an atom is a file clipboard target
+    pub fn is_file_target(&self, atom: Atom) -> bool {
+        atom == self.text_uri_list || atom == self.gnome_copied_files
     }
 
     /// Get the preferred text target from a list of targets
@@ -165,6 +183,19 @@ impl Atoms {
         None
     }
 
+    /// Get the preferred file target from a list of targets
+    pub fn preferred_file_target(&self, targets: &[Atom]) -> Option<Atom> {
+        // Prefer gnome-copied-files (includes cut/copy info), then text/uri-list
+        let preference = [self.gnome_copied_files, self.text_uri_list];
+
+        for preferred in preference {
+            if targets.contains(&preferred) {
+                return Some(preferred);
+            }
+        }
+        None
+    }
+
     /// Get the list of targets we support for text
     pub fn supported_text_targets(&self) -> Vec<Atom> {
         vec![
@@ -185,5 +216,10 @@ impl Atoms {
             self.image_webp,
             self.image_bmp,
         ]
+    }
+
+    /// Get the list of targets we support for file URIs
+    pub fn supported_file_targets(&self) -> Vec<Atom> {
+        vec![self.text_uri_list, self.gnome_copied_files]
     }
 }

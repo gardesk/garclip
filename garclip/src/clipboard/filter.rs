@@ -69,6 +69,14 @@ impl ContentFilter {
         match content {
             ClipboardContent::Text(text) => self.should_filter_text(text),
             ClipboardContent::Image { data, .. } => self.should_filter_image(data),
+            ClipboardContent::Files { uris, .. } => {
+                // Never filter file URIs - they're important
+                if uris.is_empty() {
+                    tracing::debug!("Filtering empty file list");
+                    return true;
+                }
+                false
+            }
         }
     }
 
