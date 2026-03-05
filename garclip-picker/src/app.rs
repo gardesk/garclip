@@ -53,8 +53,8 @@ impl App {
         // Connect to X11
         let conn = Connection::connect(None)?;
 
-        // Detect primary monitor for centering
-        let monitor = gartk_x11::primary_monitor(&conn)?;
+        // Detect monitor of active window (falls back to pointer position)
+        let monitor = gartk_x11::monitor_of_active_window(&conn)?;
 
         // Calculate popup size and position
         let width = 600;
